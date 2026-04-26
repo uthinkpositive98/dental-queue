@@ -114,67 +114,24 @@ async function fetchSheetCSV(sheetName) {
   return parseCSV(await fetchWithProxy(url));
 }
 
+async function fetchSheetByGid(gid) {
+  const url = `${EXPORT_URL}&gid=${gid}`;
+  return parseCSV(await fetchWithProxy(url));
+}
+
 async function loadSheetNames() {
-  // ลองอ่านชื่อ sheet จาก gviz ก่อน
+  // ลองอ่านจาก gviz
   try {
     const raw = await fetchWithProxy(GVIZ_URL);
-    // gviz ส่ง sheet names ใน format: "name":"27 Apr - 3 May"
     const match = raw.match(/"name":"([^"]+)"/g) || [];
-    const names = match
-      .map(m => m.replace(/^"name":"/, "").replace(/"$/, ""))
-      .filter(n => n.includes("Apr") || n.includes("May") || n.includes("Jun") ||
-                   n.includes("Jul") || n.includes("Aug") || n.includes("Sep") ||
-                   n.includes("Mar") || n.includes("Feb") || n.includes("Jan") ||
-                   n.includes("Oct") || n.includes("Nov") || n.includes("Dec"));
-    if (names.length >= 2) return names;
-  } catch {}
-
-  // fallback: สร้างชื่อ sheet จากวันที่จริง (ทีละ 7 วัน จาก sheet แรก)
-  try {
-    const firstCSV = await fetchWithProxy(EXPORT_URL);
-    const rows = parseCSV(firstCSV);
-    const startStr = rows[ROW_DATE]?.[1]; // เช่น "27-Apr"
-    if (startStr) {
-      const start = parseSheetDate(startStr);
-      if (start) {
-        const names = [];
-        for (let i = 0; i < 16; i++) {
-          const s = new Date(start); s.setDate(s.getDate() + i * 7);
-          const e = new Date(s);    e.setDate(e.getDate() + 6);
-          const fmt = d => {
-            const mon = d.toLocaleString("en",{month:"short"});
-            return `${d.getDate()} ${mon}`;
-          };
-          names.push(`${fmt(s)} - ${fmt(e)}`);
-        }
-        return names;
-      }
-    }
-  } catch {}
-
-  // last resort: ชื่อ sheet จริงของ spreadsheet นี้
-  return [
-    "27 Apr - 3 May",
-    "4 Apr - 11 May",
-    "12 Apr - 18 May",
-    "19 Apr - 25 May",
-    "26 Apr - 1 June",
-    "2 June - 8 June",
-    "9 June - 15 June",
-    "16 June - 22 June",
-    "23 June - 29 June",
-    "30 June- 6 June",
-    "7 July- 13 July",
-    "14 July- 20 July",
-    "21 July- 27 July",
-    "28 July- 3 Aug",
-    "4 Aug - 10 Aug",
-    "11 Aug - 17 Aug",
-    "18 Aug - 24 Aug",
-    "25 Aug - 31 Aug",
-    "1 Sep - 7 Sep"
-  ];
+    const names = match.map(m => m.replace(/^"name":"/, "").replace(/"$/, ""));
+    // กรองเอาแค่ชื่อที่มีเดือน หรือชื่อที่มี - (ช่วงวัน)
+    const filtered = names.filter(n => /\d/.test(n) || n.includes("-") || n.includes("Apr") || n.includes("May") || n.includes("Jun") || n.includes("Jul") || n.includes("Aug"));
+    if (filtered.length >= 2) { console.log("gviz names:", filtered); return filtered; }
+  } catch(e) { console.log("gviz failed:", e); }
+  return null; // signal to use gid-based loading
 }
+
 
 // ── inject CSS once ───────────────────────────────────────────────────────────
 if (typeof document !== "undefined" && !document.getElementById("dq-styles")) {
@@ -218,32 +175,27 @@ export default function App() {
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      let names;
-      try { names = await loadSheetNames(); }
-      catch { names = Array.from({length:16},(_,i)=>`Sheet${i+1}`); }
-
       const allWeeks = [];
       let first = null, cutoff = null;
-      let debugInfo = { sheetsTried: 0, sheetsOk: 0, firstRows: null };
+      let debugInfo = { sheetsTried: 0, sheetsOk: 0 };
 
-      for (const name of names) {
+      // วนลูปด้วย gid=0,1,2,... จนกว่าจะ error หรือครบ 75 วัน
+      for (let gid = 0; gid < 30; gid++) {
         debugInfo.sheetsTried++;
         try {
-          const rows = await fetchSheetCSV(name);
-          if (rows.length < ROW_START + 1) continue;
+          const url = `${EXPORT_URL}&gid=${gid}`;
+          const text = await fetchWithProxy(url);
+          const rows = parseCSV(text);
+          if (rows.length < ROW_START + 1) break;
 
-          // เก็บ debug rows แรก
-          if (!debugInfo.firstRows) debugInfo.firstRows = rows.slice(0,10).map(r=>r.slice(0,4));
+          const dateCells = rows[ROW_DATE]?.slice(1) || [];
+          const dayCells  = rows[ROW_DAY]?.slice(1)  || [];
+          const dataRows  = rows.slice(ROW_START);
+          const slotCells = dataRows.map(r => r[0]);
 
-          const dateCells = rows[ROW_DATE]?.slice(1) || [];  // col B–H
-          const dayCells  = rows[ROW_DAY]?.slice(1)  || [];  // col B–H
-          const slotRows  = rows.slice(ROW_START);
-
-          // หาวันที่เริ่มสัปดาห์
           const sd = parseSheetDate(dateCells[0]);
-          if (!sd) continue;
+          if (!sd) break; // ถ้าไม่มีวันที่ หยุดได้เลย
 
-          // จำกัด 2.5 เดือน = 75 วัน
           if (!first) {
             first  = sd;
             cutoff = new Date(sd);
@@ -254,21 +206,17 @@ export default function App() {
 
           const days = [];
           for (let col = 0; col < 7; col++) {
-            const dateVal = dateCells[col];
-            const dayVal  = dayCells[col];
-            if (!dateVal && !dayVal) continue;
-
+            if (!dateCells[col] && !dayCells[col]) continue;
             const avail = [];
-            for (const row of slotRows) {
+            for (const row of dataRows) {
               const slotLabel = String(row[0]||"").trim();
-              if (!inRange(slotLabel)) continue;          // เฉพาะ 09:00–17:00
-              const cell = String(row[col+1]||"").trim(); // col+1 เพราะ col A = label
-              if (cell === "" || cell === "-") avail.push(slotLabel); // ว่าง = ไม่มีชื่อ
+              if (!inRange(slotLabel)) continue;
+              const cell = String(row[col+1]||"").trim();
+              if (cell === "" || cell === "-") avail.push(slotLabel);
             }
-
             days.push({
-              dayKey: String(dayVal||"").toUpperCase().trim(),
-              dateVal,
+              dayKey: String(dayCells[col]||"").toUpperCase().trim(),
+              dateVal: dateCells[col],
               times: groupTimes(avail),
             });
           }
@@ -277,7 +225,10 @@ export default function App() {
             end:   dateCells[6] || dateCells.filter(Boolean).at(-1),
             days,
           });
-        } catch { continue; }
+        } catch(e) {
+          console.log(`gid ${gid} failed:`, e.message);
+          break; // หยุดเมื่อ error
+        }
       }
 
       setDebug(debugInfo);
