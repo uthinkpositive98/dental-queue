@@ -115,13 +115,65 @@ async function fetchSheetCSV(sheetName) {
 }
 
 async function loadSheetNames() {
+  // ลองอ่านชื่อ sheet จาก gviz ก่อน
   try {
     const raw = await fetchWithProxy(GVIZ_URL);
+    // gviz ส่ง sheet names ใน format: "name":"27 Apr - 3 May"
     const match = raw.match(/"name":"([^"]+)"/g) || [];
-    const names = match.map(m => m.replace(/^"name":"/, "").replace(/"$/, ""));
-    if (names.length) return names;
+    const names = match
+      .map(m => m.replace(/^"name":"/, "").replace(/"$/, ""))
+      .filter(n => n.includes("Apr") || n.includes("May") || n.includes("Jun") ||
+                   n.includes("Jul") || n.includes("Aug") || n.includes("Sep") ||
+                   n.includes("Mar") || n.includes("Feb") || n.includes("Jan") ||
+                   n.includes("Oct") || n.includes("Nov") || n.includes("Dec"));
+    if (names.length >= 2) return names;
   } catch {}
-  return Array.from({length:16},(_,i)=>`Sheet${i+1}`);
+
+  // fallback: สร้างชื่อ sheet จากวันที่จริง (ทีละ 7 วัน จาก sheet แรก)
+  try {
+    const firstCSV = await fetchWithProxy(EXPORT_URL);
+    const rows = parseCSV(firstCSV);
+    const startStr = rows[ROW_DATE]?.[1]; // เช่น "27-Apr"
+    if (startStr) {
+      const start = parseSheetDate(startStr);
+      if (start) {
+        const names = [];
+        for (let i = 0; i < 16; i++) {
+          const s = new Date(start); s.setDate(s.getDate() + i * 7);
+          const e = new Date(s);    e.setDate(e.getDate() + 6);
+          const fmt = d => {
+            const mon = d.toLocaleString("en",{month:"short"});
+            return `${d.getDate()} ${mon}`;
+          };
+          names.push(`${fmt(s)} - ${fmt(e)}`);
+        }
+        return names;
+      }
+    }
+  } catch {}
+
+  // last resort: ชื่อ sheet จริงของ spreadsheet นี้
+  return [
+    "27 Apr - 3 May",
+    "4 Apr - 11 May",
+    "12 Apr - 18 May",
+    "19 Apr - 25 May",
+    "26 Apr - 1 June",
+    "2 June - 8 June",
+    "9 June - 15 June",
+    "16 June - 22 June",
+    "23 June - 29 June",
+    "30 June- 6 June",
+    "7 July- 13 July",
+    "14 July- 20 July",
+    "21 July- 27 July",
+    "28 July- 3 Aug",
+    "4 Aug - 10 Aug",
+    "11 Aug - 17 Aug",
+    "18 Aug - 24 Aug",
+    "25 Aug - 31 Aug",
+    "1 Sep - 7 Sep"
+  ];
 }
 
 // ── inject CSS once ───────────────────────────────────────────────────────────
