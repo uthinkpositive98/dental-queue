@@ -1,16 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 
-const SHEET_ID   = "1FkEZ5OgkfCiJyyCkpiiGI2IWz6-5cOKVX47H1g0IJRk";
-const EXPORT_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv`;
-const GVIZ_URL   = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json`;
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxA_pG05B5Wl8vV1xavLAkJDDqD-k9OxZGMYyxN7UiGwvJSZDXK7NGvtsnkQ3Pzs0VR/exec";
 
-// ลอง fetch ตรง → ถ้าไม่ได้ (CORS) ใช้ proxy สำรอง
-const PROXIES = [
-  "",                                        // ตรง (ใช้ได้เมื่อ deploy บน Vercel)
-  "https://corsproxy.io/?",                  // proxy 1
-  "https://api.allorigins.win/raw?url=",     // proxy 2
-];
-
+// ROW constants ยังใช้อยู่สำหรับ parse data
 async function fetchWithProxy(url) {
   for (const proxy of PROXIES) {
     try {
@@ -109,29 +101,12 @@ function parseCSV(text) {
   return rows;
 }
 
-async function fetchSheetCSV(sheetName) {
-  const url = `${EXPORT_URL}&sheet=${encodeURIComponent(sheetName)}`;
-  return parseCSV(await fetchWithProxy(url));
+// ดึงข้อมูลทั้งหมดจาก Apps Script ครั้งเดียว
+async function fetchAllData() {
+  const res = await fetch(APPS_SCRIPT_URL);
+  if (!res.ok) throw new Error("Apps Script fetch failed: " + res.status);
+  return await res.json(); // [{name, data: [[row],[row],...]}]
 }
-
-async function fetchSheetByGid(gid) {
-  const url = `${EXPORT_URL}&gid=${gid}`;
-  return parseCSV(await fetchWithProxy(url));
-}
-
-async function loadSheetNames() {
-  // ลองอ่านจาก gviz
-  try {
-    const raw = await fetchWithProxy(GVIZ_URL);
-    const match = raw.match(/"name":"([^"]+)"/g) || [];
-    const names = match.map(m => m.replace(/^"name":"/, "").replace(/"$/, ""));
-    // กรองเอาแค่ชื่อที่มีเดือน หรือชื่อที่มี - (ช่วงวัน)
-    const filtered = names.filter(n => /\d/.test(n) || n.includes("-") || n.includes("Apr") || n.includes("May") || n.includes("Jun") || n.includes("Jul") || n.includes("Aug"));
-    if (filtered.length >= 2) { console.log("gviz names:", filtered); return filtered; }
-  } catch(e) { console.log("gviz failed:", e); }
-  return null; // signal to use gid-based loading
-}
-
 
 // ── inject CSS once ───────────────────────────────────────────────────────────
 if (typeof document !== "undefined" && !document.getElementById("dq-styles")) {
@@ -175,26 +150,24 @@ export default function App() {
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
+      // ดึงข้อมูลทั้งหมดจาก Apps Script ครั้งเดียว
+      const sheets = await fetchAllData();
       const allWeeks = [];
       let first = null, cutoff = null;
-      let debugInfo = { sheetsTried: 0, sheetsOk: 0 };
+      let debugInfo = { sheetsTried: sheets.length, sheetsOk: 0 };
 
-      // วนลูปด้วย gid=0,1,2,... จนกว่าจะ error หรือครบ 75 วัน
-      for (let gid = 0; gid < 30; gid++) {
-        debugInfo.sheetsTried++;
+      for (const sheet of sheets) {
         try {
-          const url = `${EXPORT_URL}&gid=${gid}`;
-          const text = await fetchWithProxy(url);
-          const rows = parseCSV(text);
-          if (rows.length < ROW_START + 1) break;
+          const rows = sheet.data;
+          if (!rows || rows.length < ROW_START + 1) continue;
 
           const dateCells = rows[ROW_DATE]?.slice(1) || [];
           const dayCells  = rows[ROW_DAY]?.slice(1)  || [];
           const dataRows  = rows.slice(ROW_START);
           const slotCells = dataRows.map(r => r[0]);
 
-          const sd = parseSheetDate(dateCells[0]);
-          if (!sd) break; // ถ้าไม่มีวันที่ หยุดได้เลย
+          const sd = parseSheetDate(String(dateCells[0]||""));
+          if (!sd) continue;
 
           if (!first) {
             first  = sd;
@@ -215,20 +188,17 @@ export default function App() {
               if (cell === "" || cell === "-") avail.push(slotLabel);
             }
             days.push({
-              dayKey: String(dayCells[col]||"").toUpperCase().trim(),
-              dateVal: dateCells[col],
-              times: groupTimes(avail),
+              dayKey:  String(dayCells[col]||"").toUpperCase().trim(),
+              dateVal: String(dateCells[col]||""),
+              times:   groupTimes(avail),
             });
           }
           allWeeks.push({
-            start: dateCells[0],
-            end:   dateCells[6] || dateCells.filter(Boolean).at(-1),
+            start: String(dateCells[0]||""),
+            end:   String(dateCells[6]||dateCells.filter(Boolean).at(-1)||""),
             days,
           });
-        } catch(e) {
-          console.log(`gid ${gid} failed:`, e.message);
-          break; // หยุดเมื่อ error
-        }
+        } catch(e) { console.warn("sheet error:", e); continue; }
       }
 
       setDebug(debugInfo);
